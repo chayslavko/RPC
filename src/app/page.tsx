@@ -1,101 +1,397 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useEffect } from "react";
+import Web3 from "web3";
+import { Contract } from "web3-eth-contract";
+import { AbiItem } from "web3-utils";
+import RPS_ABI from "../../artifacts/contracts/RPS.sol/RPS.json";
+
+enum MoveOption {
+  Null = 0,
+  Rock = 1,
+  Paper = 2,
+  Scissors = 3,
+  Spock = 4,
+  Lizard = 5,
+}
+
+interface Game {
+  contractAddress: string;
+  signature: string;
+  salt: string;
+}
+
+interface Player {
+  address: string;
+  move: MoveOption;
+  stakeAmount: string;
+}
+
+const BASE_SEPOLIA_CHAIN_ID = 84532;
+
+const getMoveOptions = () => {
+  return Object.keys(MoveOption)
+    .filter((key) => isNaN(Number(key)))
+    .map((key) => ({
+      label: key,
+      value: MoveOption[key as keyof typeof MoveOption],
+    }))
+    .filter((f) => f.value !== MoveOption.Null);
+};
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [web3, setWeb3] = useState<Web3 | null>(null);
+  const [account, setAccount] = useState<string>("");
+  const [chainId, setChainId] = useState<number>(0);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+  const [playerOne, setPlayerOne] = useState<Player>({
+    address: "",
+    move: MoveOption.Null,
+    stakeAmount: "0",
+  });
+  const [playerTwo, setPlayerTwo] = useState<Player>({
+    address: "",
+    move: MoveOption.Null,
+    stakeAmount: "0",
+  });
+
+  const [game, setGame] = useState<Game>({
+    contractAddress: "",
+    signature: "",
+    salt: "",
+  });
+
+  const [contract, setContract] = useState<Contract | null>();
+  const [deploying, setDeploying] = useState<boolean>(false);
+  const [gamePlayed, setGamePlayed] = useState<boolean>(false);
+  const [gameFinished, setGameFinished] = useState<boolean>(false);
+
+  const initWeb3 = async () => {
+    if (typeof window?.ethereum !== "undefined") {
+      const web3Instance = new Web3(window.ethereum);
+      setWeb3(web3Instance);
+
+      window.ethereum.on("accountsChanged", handleAccountsChanged);
+      window.ethereum.on("chainChanged", handleChainChanged);
+    }
+  };
+
+  const handleAccountsChanged = (accounts: string[]) => {
+    const acc = accounts[0];
+    setAccount(acc);
+    if (!game.contractAddress) {
+      setPlayerOne((p) => ({ ...p, address: accounts[0] }));
+    }
+  };
+
+  const handleChainChanged = (chainId: string) => {
+    setChainId(parseInt(chainId));
+  };
+
+  useEffect(() => {
+    initWeb3();
+
+    return () => {
+      if (window.ethereum) {
+        window.ethereum.removeListener(
+          "accountsChanged",
+          handleAccountsChanged
+        );
+        window.ethereum.removeListener("chainChanged", handleChainChanged);
+      }
+    };
+  }, [game.contractAddress]);
+
+  const getShortenAddress = (add: string) =>
+    `${add.slice(0, 6)}...${add.slice(-4)}`;
+
+  const connectWallet = async () => {
+    try {
+      if (!web3 || typeof window?.ethereum === "undefined")
+        throw new Error("Web3 not initialized");
+
+      const accounts = await window.ethereum.request({
+        method: "eth_requestAccounts",
+      });
+
+      setAccount(accounts[0]);
+      setPlayerOne((p) => ({ ...p, address: accounts[0] }));
+
+      const chnId = await web3.eth.getChainId();
+      setChainId(chnId);
+
+      if (chnId !== BASE_SEPOLIA_CHAIN_ID) {
+        alert("Connect to Goerli network");
+      }
+    } catch (error) {
+      console.error("Error connecting wallet", error);
+    }
+  };
+
+  const signMessage = async () => {
+    try {
+      if (!web3 || !account) throw new Error("Web3 or account not initialized");
+
+      const message = "Sign message to confirm identity";
+      const signature = await web3.eth.personal.sign(message, account, "");
+      const salt = web3.utils.soliditySha3(signature)!;
+
+      const signatureHash = web3.utils.soliditySha3(
+        { type: "uint8", value: playerOne.move.toString() },
+        { type: "uint256", value: salt.toString() }
+      )!;
+
+      setGame((prev) => ({
+        ...prev,
+        signature: signatureHash,
+        salt,
+      }));
+    } catch (error) {
+      console.error("Error signing message", error);
+    }
+  };
+
+  const deployContract = async () => {
+    try {
+      if (!web3 || !account || !game.signature) {
+        throw new Error("Web3, account or commitment not initialized");
+      }
+
+      setDeploying(true);
+
+      const contract = new web3.eth.Contract(RPS_ABI.abi as AbiItem[]);
+      const deploy = contract.deploy({
+        data: RPS_ABI.bytecode,
+        arguments: [game.signature, playerTwo.address],
+      });
+
+      const gas = await deploy.estimateGas();
+      const deployedContract = await deploy.send({
+        from: account,
+        gas: Math.floor(gas * 1.2),
+        value: web3.utils.toWei(playerOne.stakeAmount, "ether"),
+      });
+
+      setContract(deployedContract);
+      setGame((prev) => ({
+        ...prev,
+        contractAddress: deployedContract.options.address,
+      }));
+      setDeploying(false);
+    } catch (error) {
+      console.error("Error deploying contract", error);
+    } finally {
+      setDeploying(false);
+    }
+  };
+
+  const play = async () => {
+    try {
+      if (!contract || !account) throw new Error("Contract not deployed");
+
+      const stakeAmount = web3?.utils.toWei(playerTwo.stakeAmount, "ether");
+
+      await contract.methods.play(playerTwo.move).send({
+        from: account,
+        value: stakeAmount,
+      });
+      setGamePlayed(true);
+    } catch (error) {
+      console.error("Error playing move", error);
+    }
+  };
+
+  const solve = async () => {
+    try {
+      if (!contract || !account) throw new Error("Contract not deployed");
+
+      await contract.methods.solve(playerOne.move, BigInt(game.salt)).send({
+        from: account,
+      });
+
+      setGameFinished(true);
+    } catch (error) {
+      console.error("Error", error);
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen p-8">
+      <main className="flex flex-col gap-8">
+        <div className="flex flex-col gap-2">
+          <div className="text-black">Built on BASE_SEPOLIA chain ID=84532</div>
+          <div
+            onClick={connectWallet}
+            className="cursor-pointer p-2 bg-blue-500 text-white rounded"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+            {account
+              ? `Connected: ${getShortenAddress(account)}`
+              : "Connect Wallet"}
+          </div>
         </div>
+
+        {account && chainId === BASE_SEPOLIA_CHAIN_ID && (
+          <>
+            <div
+              className={`flex gap-4 flex-col ${
+                contract ? "pointer-events-none opacity-50" : ""
+              }`}
+            >
+              <div className="flex">
+                {`Player 1 (${getShortenAddress(
+                  playerOne.address
+                )})  game setup`}
+              </div>
+              <div className="flex gap-4">
+                <input
+                  type="string"
+                  placeholder="Enter stake (ETH)"
+                  value={playerOne.stakeAmount}
+                  onChange={(e) =>
+                    setPlayerOne((prev) => ({
+                      ...prev,
+                      stakeAmount: e.target.value,
+                    }))
+                  }
+                  className="p-2 border rounded"
+                />
+                <OptionSelect
+                  move={playerOne.move}
+                  onChange={(m) => setPlayerOne((v) => ({ ...v, move: m }))}
+                />
+              </div>
+
+              <input
+                type="text"
+                placeholder="Enter player 2 address"
+                value={playerTwo.address}
+                onChange={(e) =>
+                  setPlayerTwo((prev) => ({
+                    ...prev,
+                    address: e.target.value,
+                  }))
+                }
+                className="p-2 border rounded"
+              />
+              {!contract &&
+                (game.signature ? (
+                  <div
+                    onClick={deploying ? undefined : deployContract}
+                    className="cursor-pointer p-2 bg-green-500 text-white rounded"
+                  >
+                    {deploying ? "Deploying..." : "Start Play"}
+                  </div>
+                ) : (
+                  <div
+                    onClick={signMessage}
+                    className="cursor-pointer p-2 bg-green-500 text-white rounded"
+                  >
+                    Sign Message to Play
+                  </div>
+                ))}
+            </div>
+
+            {contract && (
+              <>
+                <div className="flex flex-col gap-4">
+                  <div className="flex">
+                    {account === playerOne.address
+                      ? "Switch to 2 player"
+                      : `Player 2 (${getShortenAddress(
+                          playerTwo.address
+                        )}) move`}
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-black">
+                      {`Stake ${playerOne.stakeAmount} ETH to play`}
+                    </div>
+                    <div className="flex gap-4">
+                      <input
+                        type="string"
+                        placeholder="Enter stake (ETH)"
+                        value={playerTwo.stakeAmount}
+                        onChange={(e) =>
+                          setPlayerTwo((prev) => ({
+                            ...prev,
+                            stakeAmount: e.target.value,
+                          }))
+                        }
+                        className="p-2 border rounded"
+                      />
+                      <OptionSelect
+                        move={playerTwo.move}
+                        onChange={(m) =>
+                          setPlayerTwo((v) => ({ ...v, move: m }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div
+                    onClick={play}
+                    className={`cursor-pointer p-2 bg-yellow-500 text-white rounded ${
+                      playerTwo.move === MoveOption.Null ||
+                      playerOne.stakeAmount !== playerTwo.stakeAmount
+                        ? "pointer-events-none opacity-50"
+                        : ""
+                    }`}
+                  >
+                    Play
+                  </div>
+                </div>
+                {gamePlayed && (
+                  <div className="flex gap-8">
+                    {gameFinished ? (
+                      <div
+                        onClick={solve}
+                        className="flex-auto p-2 bg-purple-500 text-white rounded"
+                      >
+                        Game completed
+                      </div>
+                    ) : account === playerOne.address ? (
+                      <div
+                        onClick={solve}
+                        className="cursor-pointer p-2 bg-red-500 text-white rounded"
+                      >
+                        Resolve game
+                      </div>
+                    ) : (
+                      `Switch to address: ${getShortenAddress(
+                        playerOne.address
+                      )} to resolve game`
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
       </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
     </div>
   );
 }
+
+const OptionSelect = ({
+  move,
+  onChange,
+}: {
+  move: MoveOption;
+  onChange: (value: MoveOption) => void;
+}) => {
+  return (
+    <select
+      value={move}
+      onChange={(e) => onChange(Number(e.target.value) as MoveOption)}
+      className="p-2 border rounded flex-auto"
+    >
+      <option value={MoveOption.Null} disabled>
+        Select
+      </option>
+      {getMoveOptions().map(({ label, value }) => (
+        <option key={value} value={value}>
+          {label}
+        </option>
+      ))}
+    </select>
+  );
+};
