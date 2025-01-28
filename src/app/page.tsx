@@ -68,6 +68,7 @@ export default function Home() {
 
   const initWeb3 = async () => {
     if (typeof window?.ethereum !== "undefined") {
+      // @ts-expect-error object is valid
       const web3Instance = new Web3(window.ethereum);
       setWeb3(web3Instance);
 
